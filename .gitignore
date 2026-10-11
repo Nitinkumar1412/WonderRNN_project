@@ -1,0 +1,51 @@
+
+# =========================
+# Datasets
+# =========================
+datasets/
+dataset/
+data/raw/
+*.csv
+*.parquet
+*.feather
+
+# =========================
+# Model weights and checkpoints
+# =========================
+checkpoints/
+weights/
+models/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.onnx.data
+
+# =========================
+# Python-generated files
+# =========================
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# =========================
+# Jupyter Notebook
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Secrets and environment files
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Logs and temporary outputs
+# =========================
+logs/
+outputs/
+*.log
