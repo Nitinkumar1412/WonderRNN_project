@@ -159,3 +159,17 @@ def test_ensemble_is_mean_of_members(tmp_path):
     out = np.stack([m.predict(types.SimpleNamespace(seq_ix=3, step_in_seq=t, need_prediction=True, state=raw[t]))
                     for t in range(T)])
     assert np.abs(out - np.mean(refs, axis=0)).max() < 1e-4
+
+
+def test_bidirectional_only_for_mask():
+    cfg = load_config(None, ["model.kind=gru", "model.d_proj=8", "model.gru_hidden=8", "model.gru_layers=1",
+                             "model.bidirectional=true", "model.aux_horizons=[]"])
+    with pytest.raises(ValueError):
+        build(cfg, "target")
+    net = build(cfg, "mask").eval()
+    f = torch.randn(1, 30, 224)
+    with torch.no_grad():
+        a = net(f)[0]
+        f2 = f.clone(); f2[:, 20:] += 1.0                    # change only FUTURE rows
+        b = net(f2)[0]
+    assert (a[:, :10] - b[:, :10]).abs().max() > 1e-6         # earlier outputs see the future

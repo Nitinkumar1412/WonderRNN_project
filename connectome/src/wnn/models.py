@@ -99,6 +99,9 @@ class Net(nn.Module):
     def __init__(self, mc, n_in: int, n_out: int = 2, bound: float = 0.0, n_aux: int = 0) -> None:
         super().__init__()
         self.kind = mc.kind
+        bidir = bool(mc.get("bidirectional", False))
+        if bidir and self.kind != "gru":
+            raise ValueError("model.bidirectional needs model.kind=gru")
         if self.kind not in ("gru", "lrnn", "hybrid"):
             raise ValueError(f"model.kind must be gru | lrnn | hybrid, got {self.kind}")
         d = int(mc.d_proj)
@@ -107,8 +110,8 @@ class Net(nn.Module):
         if self.kind in ("gru", "hybrid"):
             if self.kind == "hybrid" and int(mc.gru_hidden) != d:
                 raise ValueError("hybrid needs model.gru_hidden == model.d_proj")
-            self.gru = nn.GRU(d, int(mc.gru_hidden), int(mc.gru_layers), batch_first=True)
-            width = int(mc.gru_hidden)
+            self.gru = nn.GRU(d, int(mc.gru_hidden), int(mc.gru_layers), batch_first=True, bidirectional=bidir)
+            width = int(mc.gru_hidden) * (2 if bidir else 1)
         if self.kind in ("lrnn", "hybrid"):
             self.blocks = nn.ModuleList(LBlock(d, int(mc.lrnn_state), int(mc.lrnn_mlp))
                                         for _ in range(int(mc.lrnn_layers)))
@@ -148,6 +151,8 @@ def featurize(raw, mean, std, clip: float, diff: bool):
 def build(cfg, objective: str = "target") -> Net:
     mc = cfg.model
     n_in = n_inputs(cfg)
+    if bool(mc.get("bidirectional", False)) and objective != "mask":
+        raise ValueError("model.bidirectional reads future rows: only allowed for objective=mask (never shipped)")
     if objective == "target":
         return Net(mc, n_in, 2, float(mc.out_bound), 2 * len(mc.aux_horizons or []))
     if objective == "mask":

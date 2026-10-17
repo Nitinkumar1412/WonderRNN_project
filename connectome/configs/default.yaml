@@ -31,6 +31,8 @@ model:
   lrnn_layers: 3
   lrnn_state: 512              # per-block diagonal state width (cost is ~linear in this, not quadratic)
   lrnn_mlp: 256                # per-block MLP hidden width (0 = no MLP)
+  bidirectional: false         # gru only, objective=mask only: the mask model may read future rows (it just weights
+                               # training rows and is never shipped); target models must stay causal
   reset_every: 2000            # zero the recurrent state every N rows, train AND inference (0 = never)
   out_bound: 2.0               # outputs = B*tanh(y/B): never beyond the metric clip, so loss == metric
   aux_horizons: [10, 50]       # training-only heads predicting y_{t+h}; dropped at export ([] = off)

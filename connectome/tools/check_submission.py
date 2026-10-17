@@ -61,6 +61,17 @@ def main() -> None:
         preds[backend] = np.concatenate(allp)
         print(f"{backend:6s} init {init:.1f}s  {us:6.1f} us/row  -> {us * 39.4e6 / 6e7:5.1f} min / 39.4M rows  "
               f"WP {acc.result()['weighted_pearson']:.5f}")
+    best = "c" if "c" in preds else ("numpy" if "numpy" in preds else None)
+    if best:                                     # the rules ask for identical predictions on repeated runs
+        seq, X, _, need, _ = seqs[0]
+        m = sol.PredictionModel(best)
+        P = np.full((len(X), 2), np.nan, np.float32)
+        for s in range(len(X)):
+            v = m.predict(DataPoint(seq, s, bool(need[s]), X[s]))
+            if v is not None:
+                P[s] = v
+        first = preds[best][:len(X)]
+        print(f"determinism ({best}): second run bit-identical = {np.array_equal(P, first, equal_nan=True)}")
     if len(preds) == 2:
         ok = ~np.isnan(preds["c"][:, 0])
         print(f"max |c - numpy| = {np.abs(preds['c'][ok] - preds['numpy'][ok]).max():.2e}")
