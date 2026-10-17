@@ -123,3 +123,39 @@ def test_torch_vs_solution_step(kind, weights, tmp_path):
     out = np.stack([m.predict(types.SimpleNamespace(seq_ix=7, step_in_seq=t, need_prediction=True, state=raw[t]))
                     for t in range(T)])
     assert np.abs(out - ref).max() < 1e-4, np.abs(out - ref).max()
+
+
+def test_ensemble_is_mean_of_members(tmp_path):
+    """meta 'members': 2 -> solution.py returns the mean of two different networks (torch reference)."""
+    cfg = load_config(None, ["model.kind=lrnn", "model.d_proj=16", "model.lrnn_layers=2", "model.lrnn_state=24",
+                             "model.lrnn_mlp=8", "model.reset_every=50", "model.aux_horizons=[]"])
+    rng = np.random.default_rng(0)
+    T = 150
+    mean = rng.standard_normal(112).astype(np.float32)
+    std = (rng.random(112) + 0.5).astype(np.float32)
+    raw = (mean + std * rng.standard_normal((T, 112))).astype(np.float16).astype(np.float32)
+    st = types.SimpleNamespace(mean=mean, std=std)
+    padded = torch.from_numpy(np.concatenate([raw[:1], raw]))[None]
+    f = featurize(padded, torch.from_numpy(mean), torch.from_numpy(std), cfg.features.clip, True)
+    refs = []
+    for i in range(2):
+        torch.manual_seed(i)
+        net = build(cfg).eval()
+        for p in net.parameters():
+            p.data.add_(torch.randn_like(p) * 0.2)
+        round_matrices_f16(net)
+        with torch.no_grad():
+            refs.append(net(f.reshape(T // 50, 50, -1))[0].reshape(T, 2).numpy())
+        Wt, meta = to_npz(net, cfg, st, "f16")
+        meta["backend"] = "numpy"
+        if i == 0:
+            meta["members"] = 2
+        np.savez(tmp_path / ("model.npz" if i == 0 else f"model_{i}.npz"), **Wt)
+        (tmp_path / ("meta.json" if i == 0 else f"meta_{i}.json")).write_text(json.dumps(meta))
+    assert np.abs(refs[0] - refs[1]).max() > 1e-3                 # members really differ
+    sol = _solution()
+    sol.HERE = tmp_path
+    m = sol.PredictionModel("numpy")
+    out = np.stack([m.predict(types.SimpleNamespace(seq_ix=3, step_in_seq=t, need_prediction=True, state=raw[t]))
+                    for t in range(T)])
+    assert np.abs(out - np.mean(refs, axis=0)).max() < 1e-4

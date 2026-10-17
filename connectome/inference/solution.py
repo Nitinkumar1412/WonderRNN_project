@@ -9,6 +9,9 @@ to numpy. Both run the same equations as training (src/wnn/models.py):
     u = gelu(proj f) -> GRU layers and/or linear-recurrence blocks -> head -> B*tanh(./B)
 
 The recurrent state is zeroed when seq_ix changes and every `reset_every` rows.
+
+Ensemble: meta.json "members": N runs N networks (member 0 = model.npz / meta.json, member i =
+model_i.npz / meta_i.json) and returns the mean of their outputs. kernel.c is compiled once.
 """
 from __future__ import annotations
 
@@ -161,7 +164,13 @@ class CNet:
         return self.out.copy()
 
 
+_SO: Path | None = None
+
+
 def _compile() -> Path:
+    global _SO
+    if _SO is not None and _SO.exists():
+        return _SO
     src = HERE / "kernel.c"
     cc = shutil.which("gcc") or shutil.which("cc")
     if not cc:
@@ -170,38 +179,66 @@ def _compile() -> Path:
     out = Path(tempfile.gettempdir()) / f"wnn_kernel_{tag}_{os.getpid()}.so"
     subprocess.run([cc, "-O3", "-march=native", "-fPIC", "-shared", "-fno-math-errno", str(src),
                     "-o", str(out), "-lm"], check=True, capture_output=True, timeout=120)
+    _SO = out
     return out
 
 
-def _load():
-    """-> (float32 weights for numpy, weights as stored (float16 matrices when weights=f16), meta)"""
-    meta = json.loads((HERE / "meta.json").read_text())
-    with np.load(HERE / "model.npz") as z:
+def _load(i: int = 0):
+    """-> (float32 weights for numpy, weights as stored (float16 matrices when weights=f16), meta) of member i"""
+    mf, nf = ("meta.json", "model.npz") if i == 0 else (f"meta_{i}.json", f"model_{i}.npz")
+    meta = json.loads((HERE / mf).read_text())
+    with np.load(HERE / nf) as z:
         Wraw = {k: np.ascontiguousarray(z[k]) for k in z.files}
     Wt = {k: v.astype(np.float32) for k, v in Wraw.items()}
     return Wt, Wraw, meta
 
 
+class AvgNet:
+    """Mean of several networks that see the same rows (an ensemble in one submission)."""
+
+    def __init__(self, nets: list) -> None:
+        self.nets = nets
+        self.prev = nets[0].prev
+
+    def reset(self) -> None:
+        for n in self.nets:
+            n.reset()
+
+    def step(self, raw: np.ndarray, first: bool) -> np.ndarray:
+        out = self.nets[0].step(raw, first).astype(np.float32)
+        for n in self.nets[1:]:
+            out += n.step(raw, first)
+        return out / np.float32(len(self.nets))
+
+
+def _wrap(nets: list):
+    return nets[0] if len(nets) == 1 else AvgNet(nets)
+
+
 def make_net(backend: str | None = None):
-    """-> (net, backend name). 'auto' tries C and checks it against numpy on random rows."""
-    Wt, Wraw, meta = _load()
-    backend = backend or os.environ.get("WNN_BACKEND") or meta.get("backend", "auto")
+    """-> (net, backend name). 'auto' tries C and checks every member against numpy on random rows."""
+    meta0 = json.loads((HERE / "meta.json").read_text())
+    members = [_load(i) for i in range(int(meta0.get("members", 1)))]
+    backend = backend or os.environ.get("WNN_BACKEND") or meta0.get("backend", "auto")
     if backend in ("auto", "c"):
         try:
-            cnet, ref = CNet(Wt, meta, Wraw), NumpyNet(Wt, meta)
-            rng = np.random.default_rng(0)
-            for t in range(64):
-                raw = rng.standard_normal(len(Wt["mean"])).astype(np.float32) * Wt["std"] + Wt["mean"]
-                a, b = cnet.step(raw, t == 0), ref.step(raw, t == 0)
-                if not np.all(np.isfinite(a)) or np.max(np.abs(a - b)) > 1e-3:
-                    raise RuntimeError(f"C step disagrees with numpy by {np.max(np.abs(a - b)):.2e}")
-            cnet.reset(); cnet.prev[:] = 0.0
-            return cnet, "c"
+            nets = []
+            for Wt, Wraw, meta in members:
+                cnet, ref = CNet(Wt, meta, Wraw), NumpyNet(Wt, meta)
+                rng = np.random.default_rng(0)
+                for t in range(64):
+                    raw = rng.standard_normal(len(Wt["mean"])).astype(np.float32) * Wt["std"] + Wt["mean"]
+                    a, b = cnet.step(raw, t == 0), ref.step(raw, t == 0)
+                    if not np.all(np.isfinite(a)) or np.max(np.abs(a - b)) > 1e-3:
+                        raise RuntimeError(f"C step disagrees with numpy by {np.max(np.abs(a - b)):.2e}")
+                cnet.reset(); cnet.prev[:] = 0.0
+                nets.append(cnet)
+            return _wrap(nets), "c"
         except Exception as e:                       # noqa: BLE001 - any failure -> numpy
             if backend == "c":
                 raise
             print(f"[wnn] C backend unavailable ({e.__class__.__name__}: {e}); using numpy", flush=True)
-    return NumpyNet(Wt, meta), "numpy"
+    return _wrap([NumpyNet(Wt, meta) for Wt, _, meta in members]), "numpy"
 
 
 class PredictionModel:

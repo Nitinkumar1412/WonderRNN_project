@@ -1,9 +1,10 @@
 """export: a run -> submission folder + zip, then parity and latency checks  (CPU)
 
     python -m wnn export --run stu_f0 [export.name=sub_v3] [export.backend=numpy]
+    python -m wnn export --run a,b,c export.name=ens3        (ensemble: outputs averaged)
 
-Writes work/submissions/<name>/{solution.py, kernel.c, model.npz, meta.json} and
-work/submissions/<name>.zip (everything at the zip root). Then:
+Writes work/submissions/<name>/{solution.py, kernel.c, model.npz, meta.json} (+ model_i.npz,
+meta_i.json for members 1..) and work/submissions/<name>.zip (everything at the zip root). Then:
   parity  replays export.parity_seqs valid sequences from the parquet file through
           PredictionModel.predict (every backend that loads here) and compares with the
           torch model; reports the max difference and both WP scores
@@ -28,7 +29,7 @@ from .data import FEATURE_COLUMNS, SEQ_LEN, TARGET_COLUMNS, WARMUP, Store
 from .evaluate import predict
 from .metric import global_wp
 from .runs import load_run
-from .util import Work, log, save_json
+from .util import Work, as_list, log, save_json
 
 INFERENCE_DIR = CODE_DIR / "inference"
 
@@ -127,15 +128,26 @@ def replay(mod, backend: str, DataPoint, seq_ix: int, X: np.ndarray):
     return P, (time.perf_counter() - t0) / SEQ_LEN * 1e6
 
 
+def ensemble_predict(models, rcfgs, st: Store, idx: int):
+    """Torch reference for a submission: mean of the members' outputs on one sequence."""
+    outs = [next(predict(m, r, st, [idx], 1, "cpu"))[1][:, :2] for m, r in zip(models, rcfgs)]
+    return np.mean(outs, axis=0)
+
+
 def run(cfg, args) -> None:
     W = Work(cfg)
-    if not args.run:
-        raise SystemExit("export needs --run NAME")
-    model, rcfg, ck = load_run(W.root, args.run, "cpu")
-    if ck["objective"] != "target":
+    runs = as_list(args.run)
+    if not runs:
+        raise SystemExit("export needs --run NAME[,NAME2,...]")
+    loaded = [load_run(W.root, r, "cpu") for r in runs]
+    models, rcfgs = [m for m, _, _ in loaded], [c for _, c, _ in loaded]
+    if any(ck["objective"] != "target" for _, _, ck in loaded):
         raise SystemExit("only target runs can be exported")
+    if len({(int(c.model.reset_every), c.data.dtype, bool(c.features.diff)) for c in rcfgs}) != 1:
+        raise SystemExit("ensemble members must share reset_every, data.dtype and features.diff")
+    rcfg = rcfgs[0]
     st = Store(W.arrays(""), rcfg.data.dtype, with_mask_p=False)
-    name = cfg.export.name or args.run
+    name = cfg.export.name or (runs[0] if len(runs) == 1 else f"ens{len(runs)}_{runs[0]}")
     sub = W.root / "submissions" / name
     if sub.exists():
         shutil.rmtree(sub)
@@ -143,24 +155,34 @@ def run(cfg, args) -> None:
     weights = cfg.export.weights
     full = None
     if weights == "f16":
-        full = copy.deepcopy(model)               # unrounded, to report what the rounding costs
-        round_matrices_f16(model)
-    Wt, meta = to_npz(model, rcfg, st, weights)
-    meta.update({"backend": cfg.export.backend, "run": args.run})
-    np.savez(sub / "model.npz", **Wt)
-    save_json(meta, sub / "meta.json")
+        full = [copy.deepcopy(m) for m in models]       # unrounded, to report what the rounding costs
+        for m in models:
+            round_matrices_f16(m)
+    files = ["solution.py", "kernel.c"]
+    for i, (model, rc) in enumerate(zip(models, rcfgs)):
+        Wt, meta = to_npz(model, rc, st, weights)
+        meta.update({"backend": cfg.export.backend, "run": runs[i]})
+        if i == 0 and len(runs) > 1:
+            meta["members"] = len(runs)
+        mf, nf = ("meta.json", "model.npz") if i == 0 else (f"meta_{i}.json", f"model_{i}.npz")
+        np.savez(sub / nf, **Wt)
+        save_json(meta, sub / mf)
+        files += [nf, mf]
+        if i == 0:
+            meta0 = meta
     shutil.copy(INFERENCE_DIR / "solution.py", sub / "solution.py")
     shutil.copy(INFERENCE_DIR / "kernel.c", sub / "kernel.c")
     zpath = W.root / "submissions" / f"{name}.zip"
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in ("solution.py", "kernel.c", "model.npz", "meta.json"):
+        for f in files:
             z.write(sub / f, f)
     mb = zpath.stat().st_size / 1e6
-    log(f"wrote {zpath} ({mb:.2f} MB{' - OVER 20 MB!' if mb > 20 else ''})")
+    log(f"wrote {zpath} ({mb:.2f} MB{' - OVER 20 MB!' if mb > 20 else ''}) members={len(runs)}")
+    meta = meta0
 
     mod = load_solution(sub)
     DataPoint = _datapoint_cls(cfg)
-    report = {"zip_mb": mb, "run": args.run, "meta": meta}
+    report = {"zip_mb": mb, "runs": runs, "meta": meta}
     backends = ["numpy"]
     try:
         _, b = mod.make_net("c")
@@ -169,16 +191,16 @@ def run(cfg, args) -> None:
         log(f"C backend not available here ({e.__class__.__name__}: {e}) - parity/bench on numpy only")
     torch.set_num_threads(1)
     for idx, seq_ix, X, Y, scored in _valid_sequences(cfg, st, int(cfg.export.parity_seqs)):
-        _, ref = next(predict(model, rcfg, st, [idx], 1, "cpu"))
+        ref = ensemble_predict(models, rcfgs, st, idx)
         need = np.arange(SEQ_LEN) >= WARMUP
         sel = need & scored.astype(bool)
         for b in backends:
             P, us = replay(mod, b, DataPoint, seq_ix, X)
-            d = float(np.abs(P[need] - ref[need, :2]).max())
+            d = float(np.abs(P[need] - ref[need]).max())
             r = {"max_abs_diff": d, "us_per_row": us,
-                 "wp_solution": global_wp(Y, P, sel), "wp_torch": global_wp(Y, ref[:, :2], sel)}
+                 "wp_solution": global_wp(Y, P, sel), "wp_torch": global_wp(Y, ref, sel)}
             if full is not None:
-                r["wp_torch_f32_weights"] = global_wp(Y, next(predict(full, rcfg, st, [idx], 1, "cpu"))[1][:, :2], sel)
+                r["wp_torch_f32_weights"] = global_wp(Y, ensemble_predict(full, rcfgs, st, idx), sel)
             report[f"parity_{b}_seq{seq_ix}"] = r
             log(f"parity {b} seq {seq_ix}: max|diff| {d:.2e}  {us:.1f} us/row  "
                 f"wp sol {r['wp_solution']:.4f} torch {r['wp_torch']:.4f}")
