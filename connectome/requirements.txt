@@ -1,0 +1,7 @@
+# Training environment (Python 3.10+). hpc/setup_env.sh installs torch itself (CUDA build matching
+# the node's driver) and the rest from here. The submission itself needs only numpy (+ gcc for kernel.c).
+torch>=2.4
+numpy==2.2.6          # same as the scorer image
+pyarrow==19.0.1       # same as the scorer image
+pyyaml>=6.0
+pytest>=8.0

@@ -1,0 +1,88 @@
+# Alfa Connectome - extreme track, default configuration.
+# Any key can be overridden on the command line:  python -m wnn train model.kind=lrnn train.epochs=8
+# ${VAR:-default} reads the environment; <root> is the project root
+# (two levels above code/connectome unless WNN_ROOT is set).
+
+seed: 20261016
+
+paths:
+  root: ${WNN_ROOT:-}
+  data_dir: ${WNN_DATA_DIR:-<root>/wnn_connectome_starterpack/datasets}
+  starterpack: ${WNN_STARTERPACK:-<root>/wnn_connectome_starterpack}   # utils.py for the official scorer
+  work_dir: ${WNN_WORK_DIR:-<root>/work}
+
+data:
+  n_folds: 5                   # folds = stable hash of seq_ix; valid and train sequences mixed
+  max_seqs: 0                  # >0 -> first N train + N/6 valid sequences only (smoke runs)
+  dtype: float16               # stored feature dtype; solution.py rounds inputs the same way (exact parity)
+  stats_seqs: 400              # sequences sampled for feature mean/std
+  workers: 0                   # prepare: processes (0 -> SLURM_CPUS_PER_TASK / all cores, capped at 32)
+  resume: true                 # prepare: keep sequences already written by an interrupted run
+
+features:
+  clip: 10.0                   # standardised features clipped to +-clip
+  diff: true                   # append dx_t = x_t - x_{t-1} (standardised); 224 inputs instead of 112
+
+model:
+  kind: gru                    # gru | lrnn | hybrid   (hybrid = GRU layers then linear-recurrence blocks)
+  d_proj: 128                  # input projection width (gru, hybrid: GRU input; lrnn: residual width)
+  gru_hidden: 192
+  gru_layers: 2                # hybrid: GRU layers before the blocks (gru_hidden must equal d_proj there)
+  lrnn_layers: 3
+  lrnn_state: 512              # per-block diagonal state width (cost is ~linear in this, not quadratic)
+  lrnn_mlp: 256                # per-block MLP hidden width (0 = no MLP)
+  reset_every: 2000            # zero the recurrent state every N rows, train AND inference (0 = never)
+  out_bound: 2.0               # outputs = B*tanh(y/B): never beyond the metric clip, so loss == metric
+  aux_horizons: [10, 50]       # training-only heads predicting y_{t+h}; dropped at export ([] = off)
+
+train:
+  objective: target            # target | mask | pretrain
+  epochs: 6
+  batch: 256                   # segments per step (segment = reset_every rows; whole 20k sequences if reset_every=0 - lower it)
+
+  lr: 5.0e-4
+  min_lr_frac: 0.05
+  warmup_steps: 300
+  weight_decay: 0.01
+  grad_clip: 1.0
+  amp: bf16                    # bf16 | none   (scans always run in fp32)
+  ema: 0.999                   # weight EMA decay (0 = off); the EMA weights are saved and evaluated
+  init_from: ""                # run name: load matching weights (heads excluded) e.g. a pretrain run
+  workers: 8                   # dataloader processes
+  eval_every_epoch: true
+  eval_max_seqs: 400           # held-out sequences scored after each epoch (0 = all)
+  max_steps: 0                 # >0 caps training (smoke)
+  resume: true                 # continue from runs/<run>/last.pt when it exists
+  log_every: 50
+  compile: false               # torch.compile the projection/blocks
+  micro_batch: 0               # split each batch into micro-batches of this many segments (0 = whole batch);
+                               # the global Pearson gradient stays exact. Set automatically on CUDA OOM.
+  checkpoint: false            # activation checkpointing (recompute in backward); switched on at the first OOM
+
+loss:
+  mse_weight: 0.05             # + weighted MSE keeps the output scale anchored (Pearson is scale-free)
+  moment_ema: 0.9              # running global moments across batches (0 = batch-only Pearson)
+  mask_source: auto            # auto (true mask on valid seqs, mask_p elsewhere) | none | true_only
+  mask_floor: 0.1              # row weight = |y| * (floor + (1-floor) * P(scored))
+  aux_weight: 0.1              # weight of the aux-horizon heads
+  pretrain_weight: 1.0
+
+mask:                          # mask model (objective=mask): predicts is_scored; trained on valid seqs only
+  run: mask_v1                 # run name label-mask reads
+
+distill:
+  teacher: ""                  # teachers/<name>.f16.npy; "" = off
+  lam: 0.5                     # train target = lam * y + (1 - lam) * teacher
+
+eval:
+  max_seqs: 0                  # held-out sequences scored (0 = all of the fold)
+  batch: 32
+
+export:
+  name: ""                     # submission name (default: run name)
+  backend: auto                # auto (C kernel if it compiles, else numpy) | c | numpy
+  weights: f16                 # f16: weight matrices stored float16 (half the bytes read per step; the
+                               # report shows the WP change vs f32) | f32
+  parity_seqs: 2               # valid sequences replayed through solution.py vs torch
+  bench_seqs: 1                # sequences timed through PredictionModel.predict
+  test_rows: 39400000          # rows in the test set (for the projected wall time)
