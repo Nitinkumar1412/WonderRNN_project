@@ -1,5 +1,6 @@
 #!/bin/bash
-# Smaller distilled students for the platform's time limit (the 464k-MAC student took 63m55s there).
+# Smaller distilled students (cheap fallbacks / ablations). NOTE: the platform ran the 464k-MAC student in
+# 21m47s, so there is headroom for a *wider* model; use these only to see how much accuracy size costs.
 # Per shape: self-supervised pretrain, then a distilled fold-0 student. Run on the login node:
 #   cd ~/wunder_fund_challenge/code/connectome && bash hpc/run_small.sh
 # Then compare with:  bash hpc/compare.sh   (or grep "final held-out" logs/wnn_stu_s*_f0_*.out)

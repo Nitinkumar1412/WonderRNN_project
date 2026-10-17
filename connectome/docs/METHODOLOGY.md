@@ -16,10 +16,14 @@ Scorer: 1 vCPU, 60 minutes for ~39.4M rows (~90 µs/row including the harness), 
 | **Distilled lrnn student (d96, state 384, 3 blocks)** | **0.6765** |
 | Weight soup of three hybrid students | 0.6375 (failed, see §6) |
 
-**Platform:** the distilled lrnn student scored **0.65370** on the platform, but its run took
-**63m55s**, over the 60-minute limit. Measured locally it needed 22.6 min, so the scorer is
-about **2.8× slower** than the 1-CPU Docker replica. Latency, not accuracy, is the binding
-constraint, and the next models are sized from this factor (§5).
+**Platform:** the distilled lrnn student scored **0.65370** on the platform and ran in
+**21m47s** (615 MB). Locally the same model projected to 22.6 min, so the scorer is about as fast
+as the 1-CPU Docker replica (factor ≈ 0.96) and the C kernel compiled there. The local→platform
+score gap is ≈ 0.023 (0.677 → 0.654). So latency is *not* yet binding: the model uses about a
+third of the 60-minute budget.
+
+(Correction: an earlier draft of this doc quoted 63m55s from a misread result and concluded the
+scorer was 2.8× slower. The 21m47s figure is the real one.)
 
 ## 2. Pipeline
 
@@ -91,16 +95,19 @@ and retries.
 
 ## 5. Latency model (1 CPU Docker replica)
 
-Per-row time ≈ **4 µs fixed + ~6 µs per 100k MACs/step**. The scorer is ~2.8× slower, so for a
-≤ 40-minute run on the platform the local figure must be ≤ ~15 µs/row (≲ 200k MACs).
+Per-row time ≈ **4 µs fixed + ~6 µs per 100k MACs/step**. One platform data point: the
+464k-MAC student ran 21m47s against 22.6 min locally. Keep ≥ 30% margin under 60 min because
+the scorer's speed may vary between runs (another competitor reported drift), i.e. aim for
+≲ 40 min locally ≈ 60 µs/row ≈ 900k MACs.
 
-| Model | MACs/step | Local µs/row | Local min | Est. platform min |
+| Model | MACs/step | Local µs/row | Local min | Platform min |
 |---|---:|---:|---:|---:|
-| submitted lrnn d96/S384/3 blocks | 464k | 34.4 | 22.6 | **63.9 (measured)** |
-| lrnn d64 S256 ×3, MLP128 | 211k | 16.2 | 10.7 | ~51 |
-| lrnn d96 S192 ×2, MLP96 (shape A) | 169k | 13.5 | 8.9 | ~43 |
-| lrnn d64 S256 ×2, no MLP (shape B) | 113k | 10.2 | 6.7 | ~32 |
-| floor (d16 S16) | 4k | 4.2 | 2.8 | ~8 |
+| submitted lrnn d96/S384/3 blocks | 464k | 34.4 | 22.6 | **21.8 (measured)** |
+| GRU 256×2 | 717k | 47.8 | 31.4 | – |
+| lrnn d64 S1024 ×4 | 866k | 64.5 | 42.4 | – |
+| lrnn d128 S512 ×4 | 1078k | 79.7 | 52.3 | – (too close) |
+| lrnn d96 S192 ×2, MLP96 | 169k | 13.5 | 8.9 | – |
+| lrnn d64 S256 ×2, no MLP | 113k | 10.2 | 6.7 | – |
 
 `tools/latency_grid.py` writes random-weight submissions per shape; `tools/docker_check.sh`
 times them in a 1-CPU container.
@@ -117,7 +124,9 @@ times them in a 1-CPU container.
 
 ## 7. Next steps
 
-1. Train shapes A and B (`hpc/run_small.sh`), pick by fold-0 score, export, time in Docker, submit.
+1. Spend the latency headroom: train a wider student (≈ 700–900k MACs, e.g. lrnn d64/S1024 or
+   a larger hybrid) distilled from the same zoo, and compare on fold 0 against 0.6765.
 2. Final model on all folds, a few seeds, average predictions (or distil from the average).
-3. Re-measure the platform factor with each submission; keep ≥ 30% margin under 60 min.
-4. Ask the organisers whether compiling `kernel.c` at start-up is allowed on the scorer.
+3. Re-measure the platform time with each submission; keep ≥ 30% margin under 60 min.
+4. Close the local→platform gap (0.023): check mask-weighting and reset period against the
+   platform score, not only fold 0.
