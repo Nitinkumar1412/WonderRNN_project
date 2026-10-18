@@ -1,6 +1,7 @@
 """evaluate: held-out score of a run  (GPU)
 
     python -m wnn evaluate --run NAME [--fold F]      (default fold: the one the run held out)
+    python -m wnn evaluate --runs A,B [--fold F]      (members + mean of outputs, valid-mask WP)
 
 Target runs report global WP with the real validation mask (the competition's
 setup), on all required rows, and by quarter of the sequence. Mask runs report
@@ -111,8 +112,45 @@ def heldout_subset(st: Store, ids: np.ndarray, max_seqs: int) -> np.ndarray:
     return np.concatenate([v[:nv], t[: max_seqs - nv]])
 
 
+def ensemble_score(members, st: Store, ids, batch_seqs: int = 16) -> dict:
+    """Held-out WP (real valid mask) of each member and of the mean of their outputs."""
+    need = np.arange(SEQ_LEN) >= WARMUP
+    each = [Moments() for _ in members]
+    avg = Moments()
+    gens = [predict(m, r, st, ids, batch_seqs) for m, r in members]
+    for outs in zip(*gens):
+        i = outs[0][0]
+        if not st.is_valid[i]:
+            continue
+        y = np.asarray(st.Y[i])
+        sel = need & (np.asarray(st.scored[i]) == 1)
+        ps = [o[1] for o in outs]
+        for mom, p in zip(each, ps):
+            mom.add(y, p, sel)
+        avg.add(y, np.mean(ps, axis=0), sel)
+    return {"members_wp_valid_mask": [m.score() for m in each], "ensemble_wp_valid_mask": avg.score()}
+
+
 def run(cfg, args) -> None:
     W = Work(cfg)
+    if args.runs:
+        names = [n for n in args.runs.split(",") if n]
+        members, folds = [], set()
+        for n in names:
+            model, rcfg, ck = load_run(W.root, n, device())
+            members.append((model, rcfg)); folds.add(ck["fold"])
+        if args.fold is None and len(folds) > 1:
+            raise SystemExit(f"runs held out different folds: {folds}")
+        fold = args.fold if args.fold is not None else next(iter(folds))
+        st = Store(W.arrays(""), members[0][1].data.dtype)
+        _, held = st.split(fold, "target")
+        held = heldout_subset(st, held, int(cfg.eval.max_seqs))
+        log(f"ensemble {names} on fold {fold}: {len(held)} seqs")
+        res = ensemble_score(members, st, held, int(cfg.eval.batch))
+        res.update({"runs": names, "fold": int(fold)})
+        save_json(res, W.run_dir(names[0]) / f"ens_{len(names)}_fold{fold}.json")
+        log(f"result: {res}")
+        return
     if not args.run:
         raise SystemExit("evaluate needs --run NAME")
     model, rcfg, ck = load_run(W.root, args.run, device())
