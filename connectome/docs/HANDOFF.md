@@ -34,7 +34,7 @@ Final Dataset (rescoring Nov 15 – Dec 1, 2026). Deadline Nov 15, 2026.
 | `inference/solution.py`, `kernel.c` | the shipped submission code (numpy fallback + C kernel, ensemble support) |
 | `hpc/*.sh` | Slurm launchers (`run_pipeline.sh`, `run_final*.sh`, `run_mask2.sh`, `run_diverse.sh`, `run_distill_sweep.sh`, `submit_gpu.sh`, `submit_cpu.sh`) |
 | `tools/` | `latency_grid.py` (random-weight timing grid), `docker_check.sh` (1-CPU replica), `check_submission.py` (parity + determinism) |
-| `tests/test_core.py` | 13 tests: metric, exact micro-batch gradient, scan, torch-vs-solution for every kind, ensemble, bidirectional guard |
+| `tests/test_core.py` | 14 tests: metric, exact micro-batch gradient, scan, torch-vs-solution for every kind, ensemble, bidirectional guard, `--fold -2` split |
 
 CLI: `python -m wnn <step> [--fold F] [--run NAME] [--runs a,b] key=value ...`
 Steps: `preflight prepare train label-mask teacher soup evaluate export`.
@@ -239,7 +239,17 @@ mask, LSTM, per-sequence recentering, soft state refresh, test-time gradient ada
    determinism), local projection ≤ 35 min.
 5. Record the result in §8 of this file.
 
-## 12. Open items
+## 12. Done so far (timeline)
+
+| Date | Done |
+|---|---|
+| 2026-10-16/17 | Pipeline built and pushed (`prepare`, mask, pretrain, GRU/lrnn/hybrid models, global-Pearson loss, C kernel + numpy fallback, export, Docker timing, unit tests) with `METHODOLOGY.md`. Platform timing corrected (21m47s), wide-student script, ensemble submissions (averaged members), all-data final training script, literature review (`RESEARCH.md`), bidirectional mask model (training-only), determinism check. |
+| 2026-10-18 | Loss-diversity test (`evaluate --runs`, `run_diverse.sh`), distillation `lam` sweep, final members with teacher-heavy distillation, platform check of distillation value (`single_nod`, `single_l75`). |
+| 2026-10-19 | Conclusion: distillation ≈ 0 on the platform (fold-0 gains were teacher leakage). Added `--fold -2` (train on train.parquet, hold out all of valid.parquet) with a unit test, and `hpc/run_validonly.sh`. This handoff written. Local tree and GitHub branch verified in sync; 14/14 tests pass on the dev PC. |
+
+Not yet done: `run_validonly.sh` has not been run (no result recorded), nested teachers, any item in §10.
+
+## 13. Open items
 
 - Run `hpc/run_validonly.sh` (new `--fold -2` = train on train.parquet, score all of valid.parquet with the real
   mask, no teachers). If it lands near 0.654, valid is a faithful test proxy and becomes the model-selection set;
