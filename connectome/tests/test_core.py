@@ -173,3 +173,15 @@ def test_bidirectional_only_for_mask():
         f2 = f.clone(); f2[:, 20:] += 1.0                    # change only FUTURE rows
         b = net(f2)[0]
     assert (a[:, :10] - b[:, :10]).abs().max() > 1e-6         # earlier outputs see the future
+
+
+def test_split_fold_minus2_holds_out_all_valid():
+    from wnn.data import Store
+    st = Store.__new__(Store)
+    st.is_valid = np.array([False, True, False, True, True])
+    st.fold = np.array([0, 1, 2, 3, 4])
+    st.seq_ix = np.arange(5)
+    tr, held = st.split(-2)
+    assert list(tr) == [0, 2] and list(held) == [1, 3, 4]
+    tr, held = st.split(-1)
+    assert len(tr) == 5 and len(held) == 0

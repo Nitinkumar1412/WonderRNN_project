@@ -56,8 +56,12 @@ class Store:
 
     def split(self, fold: int | None, objective: str = "target") -> tuple[np.ndarray, np.ndarray]:
         """(train_ids, heldout_ids). fold None/-1 -> all sequences train, no held-out.
+        fold -2 -> train on the train.parquet sequences, hold out ALL valid.parquet sequences (the
+        closest stand-in for the hidden test set).
         The mask objective only has labels on valid sequences."""
         ids = np.arange(self.n)
+        if fold == -2 and objective != "mask":
+            return ids[~self.is_valid], ids[self.is_valid]
         if objective == "mask":
             ids = ids[self.is_valid]
         if fold is None or fold < 0:

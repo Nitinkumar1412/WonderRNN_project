@@ -139,7 +139,8 @@ float32 weights cost ~1.6x latency for ~1e-4 WP; keep float16.
 | `single_lean` | **0.65433** | **16m46s** | 1 member, all data, lam 0.5 — current fallback |
 | `single_l25` | 0.65393 | 16m36s | lam 0.25, 12 epochs |
 | `single_l0` | 0.65197 | 17m6s | lam 0.0 (teacher only), 12 epochs |
-| `single_nod`, `single_l75` | **pending** | – | trained (`fin_nod`, `fin_l75`); export and submit |
+| `single_nod` | 0.65383 | 17m7s | **no teachers at all** — same as with teachers |
+| `single_l75` | 0.65327 | 16m31s | lam 0.75 |
 
 **Held-out fold 0 (390 valid seqs, real mask; seed noise ≈ 0.0016)**
 
@@ -163,8 +164,10 @@ float32 weights cost ~1.6x latency for ~1e-4 WP; keep float16.
    models that saw fold 0's inputs and targets. The lam sweep looks monotone on fold 0 (more teacher = better) and
    is the *opposite* on the platform (lam 0.5 > 0.25 > 0.0). For anything touching the teachers, trust only
    platform scores, or build nested teachers (see §10.1).
-2. **We never measured the undistilled student on the platform**, so the headline "+0.012 from distillation" is
-   unverified. `single_nod` is the control; export and submit it.
+2. **Distillation is worth ~0 on the platform.** `single_nod` (no teachers) scored 0.65383 vs 0.65433 for
+   `single_lean` (lam 0.5) — a difference of 0.0005, inside the noise. The fold-0 "+0.012" came from teacher
+   leakage. The 5-fold teacher zoo (many GPU-hours) bought nothing measurable. Platform scores by lam: 0.0 →
+   0.65197, 0.25 → 0.65393, 0.5 → 0.65433, 0.75 → 0.65327, none → 0.65383.
 3. **Plateau:** platform 0.652–0.655 across very different models (size, ensemble, mask, loss). Capacity is not
    the limit. The local→platform gap is ≈ 0.023 for every model, so judge changes by differences, not levels.
 4. **Mask:** a better mask is not a free win here. AUC 0.90 is what the GRU reaches; dropping mask weighting
@@ -179,7 +182,9 @@ float32 weights cost ~1.6x latency for ~1e-4 WP; keep float16.
 ### 10.1 Fix the evaluation first (cheap, high value)
 - **Nested teachers for a leak-free fold-0:** train teachers on folds {1..4} only and score fold 0 students
   against them. Then fold-0 comparisons of `lam`, epochs, teacher type become trustworthy. Cost: ~5 GPU-hours.
-- Run `single_nod` and `single_l75`. If `nod` ≈ 0.654, drop the teachers and spend the GPU time elsewhere.
+- `single_nod` ≈ `single_lean` was observed: drop the teachers; do not spend more GPU time on the zoo.
+- Use `--fold -2` (valid.parquet as the holdout) with no distillation as the leak-free evaluation until
+  nested teachers exist (see `hpc/run_validonly.sh`).
 
 ### 10.2 New architectures (all must keep O(1) per step; budget ≈ 400–500k MACs)
 1. **Negative / signed eigenvalues in the transition** (Grazzi et al., ICLR 2025, arXiv 2411.12537). Our decay
@@ -236,7 +241,9 @@ mask, LSTM, per-sequence recentering, soft state refresh, test-time gradient ada
 
 ## 12. Open items
 
-- Export and submit `single_nod`, `single_l75` (decides whether distillation is worth keeping).
+- Run `hpc/run_validonly.sh` (new `--fold -2` = train on train.parquet, score all of valid.parquet with the real
+  mask, no teachers). If it lands near 0.654, valid is a faithful test proxy and becomes the model-selection set;
+  if it lands near 0.677 the platform gap is not a split effect. Either answer is informative.
 - Final-submission policy: the current best safe choice is `single_lean` (0.65433, 16m46s). Keep two final
   candidates (one fastest-safe, one best-score) and choose by held-out CV, not the public score.
 - Keep the zip ≤ 20 MB (currently ~1.4 MB) and the repo private.
